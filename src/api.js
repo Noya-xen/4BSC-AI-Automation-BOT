@@ -30,7 +30,7 @@ export async function login(addr, signature, nonce) {
 
 export async function setInviter(session_token) {
     try {
-        const response = await axios.get(`${API_URL}/front/set/user/invite_by?invited_by=tr0N74`, {
+        const response = await axios.get(`${API_URL}/front/set/user/invite_by?invited_by=qUoMOQ`, {
             headers: {
                 'authorization': `Bearer ${session_token}`
             }
@@ -56,9 +56,9 @@ export async function getUserData(session_token) {
     }
 }
 
-export async function verifyDailyTask(session_token) {
+export async function verifyDailyTask(session_token, address) {
     try {
-        const response = await axios.post(`${API_URL}/front/get/finaltest/verify_daily_task`, {}, {
+        const response = await axios.get(`${API_URL}/front/get/finaltest/verify_daily_task?address=${address}`, {
             headers: {
                 'authorization': `Bearer ${session_token}`
             }
@@ -66,6 +66,7 @@ export async function verifyDailyTask(session_token) {
         return response.data;
     } catch (error) {
         console.error('Verify daily task failed:', error);
+        console.error('Error details:', error.response?.data || error.message);
         return null;
     }
 }
@@ -86,6 +87,7 @@ export async function createNewAgent(session_token, name, description) {
     }
     catch (error) {
         console.error('Create new agent failed:', error);
+        console.error('Error details:', error.response?.data || error.message);
         return null;
     }
 }
@@ -106,6 +108,7 @@ export async function createNewRequest(session_token, title, description) {
     }
     catch (error) {
         console.error('Create new request failed:', error);
+        console.error('Error details:', error.response?.data || error.message);
         return null;
     }
 }
