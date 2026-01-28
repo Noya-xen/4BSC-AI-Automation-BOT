@@ -5,6 +5,7 @@ import { sign_with_private_key } from './src/auth.js';
 import logger from './src/logger.js';
 import { showLogo, showStats } from './src/logo.js';
 import dotenv from 'dotenv';
+import fs from 'fs';
 import {
     getNonce,
     login,
@@ -17,22 +18,32 @@ import {
 
 dotenv.config();
 
-const private_key = process.env.PRIVATE_KEY || '';
-const WAIT_HOURS = 12;
+// Parse multiple PRIVATE_KEY entries from .env
+function parsePrivateKeys() {
+    const envContent = fs.readFileSync('.env', 'utf-8');
+    const lines = envContent.split('\n');
+    const privateKeys = [];
+    
+    for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith('PRIVATE_KEY=')) {
+            const key = trimmed.replace('PRIVATE_KEY=', '').trim();
+            if (key && key.startsWith('0x') && key.length > 10) {
+                privateKeys.push(key);
+            }
+        }
+    }
+    
+    return privateKeys;
+}
+
+const PRIVATE_KEYS = parsePrivateKeys();
+const WAIT_HOURS = parseInt(process.env.WAIT_HOURS) || 12;
 const MAX_RETRIES = 3;
 const RETRY_DELAY = 5000;
 
-const stats = {
-    uid: null,
-    totalPoint: 0,
-    days: 0,
-    agents: 0,
-    requests: 0,
-    txs: 0,
-    errors: 0,
-    lastRun: null,
-    startTime: Date.now()
-};
+// Stats per account
+const accountsStats = {};
 
 async function retryWithBackoff(fn, retries = MAX_RETRIES, delay = RETRY_DELAY) {
     for (let i = 0; i < retries; i++) {
@@ -58,10 +69,7 @@ async function countdownTimer(hours) {
 
     logger.separator();
     logger.info(`${logger.EMOJIS.hourglass} Next task check in ${parseInt(hours)} hours`);
-
     logger.separator();
-
-    let updateInterval = 60000;
 
     const countdownInterval = setInterval(() => {
         const remaining = Math.floor((endTime - Date.now()) / 1000);
@@ -75,10 +83,6 @@ async function countdownTimer(hours) {
         const mins = Math.floor((remaining % 3600) / 60);
 
         process.stdout.write(`\r${logger.COLORS.dim}⏳ Time until next check: ${logger.countdown(remaining)} (${hours}h ${mins}m remaining)${logger.COLORS.reset}`);
-
-        if (remaining < (totalSeconds - 600)) {
-            updateInterval = 600000;
-        }
     }, 60000);
 
     await sleep(totalSeconds * 1000);
@@ -100,13 +104,12 @@ async function checkTokenValid(token_expire_time) {
 }
 
 // Get token
-async function getToken() {
-    logger.header('AUTHENTICATION');
+async function getToken(private_key, accountIndex) {
+    logger.header(`AUTHENTICATION - ACCOUNT #${accountIndex + 1}`);
 
     try {
         if (!private_key) {
-            logger.error('Private key is not set in environment variables!');
-            logger.info('Please set PRIVATE_KEY in your .env file');
+            logger.error('Private key is not set!');
             return null;
         }
 
@@ -116,6 +119,11 @@ async function getToken() {
         const loader = logger.loading('Fetching nonce');
         const message = await getNonce(address);
         logger.stopLoading(loader);
+
+        if (!message || !message.data) {
+            logger.error('Failed to get nonce');
+            return null;
+        }
 
         const nonce = message.data.nonce;
         logger.success(`${logger.EMOJIS.check} Nonce received: ${logger.COLORS.yellow}${nonce}${logger.COLORS.reset}`);
@@ -138,23 +146,21 @@ async function getToken() {
             logger.success(`${logger.EMOJIS.check} Inviter configured`);
 
             logger.separator();
-            return loginResponse.data;
+            return { ...loginResponse.data, address };
         } else {
             logger.error('Login failed - no session token received');
-            stats.errors++;
             return null;
         }
 
     } catch (error) {
         logger.error(`Authentication error: ${error.message}`);
-        stats.errors++;
         return null;
     }
 }
 
 // Create agent
-async function createAgent(session_token) {
-    logger.header('CREATING AGENT');
+async function createAgent(session_token, accountIndex) {
+    logger.header(`CREATING AGENT - ACCOUNT #${accountIndex + 1}`);
 
     try {
         const loader = logger.loading('Generating AI agent data');
@@ -178,6 +184,11 @@ async function createAgent(session_token) {
         const agentResponse = await retryWithBackoff(() => createNewAgent(session_token, name_agent, description));
         logger.stopLoading(loader2);
 
+        if (!agentResponse || !agentResponse.data) {
+            logger.error('Failed to create agent on platform');
+            return false;
+        }
+
         const agentID = agentResponse.data?.id;
 
         if (agentID) {
@@ -190,8 +201,8 @@ async function createAgent(session_token) {
             if (txResult && txResult.hash) {
                 logger.success(`${logger.EMOJIS.chain} Transaction successful!`);
                 logger.info(`TX Hash: ${logger.COLORS.cyan}${txResult.hash}${logger.COLORS.reset}`);
-                stats.agents++;
-                stats.txs++;
+                accountsStats[accountIndex].agents++;
+                accountsStats[accountIndex].txs++;
                 logger.separator();
                 return true;
             }
@@ -200,14 +211,14 @@ async function createAgent(session_token) {
         return false;
     } catch (error) {
         logger.error(`Agent creation failed: ${error.message}`);
-        stats.errors++;
+        accountsStats[accountIndex].errors++;
         return false;
     }
 }
 
 // Create request
-async function createRequest(session_token) {
-    logger.header('CREATING REQUEST');
+async function createRequest(session_token, accountIndex) {
+    logger.header(`CREATING REQUEST - ACCOUNT #${accountIndex + 1}`);
 
     try {
         const loader = logger.loading('Generating AI request data');
@@ -231,6 +242,11 @@ async function createRequest(session_token) {
         const requestResponse = await retryWithBackoff(() => createNewRequest(session_token, title, description));
         logger.stopLoading(loader2);
 
+        if (!requestResponse || !requestResponse.data) {
+            logger.error('Failed to create request on platform');
+            return false;
+        }
+
         const requestID = requestResponse.data?.id;
 
         if (requestID) {
@@ -243,8 +259,8 @@ async function createRequest(session_token) {
             if (txResult && txResult.hash) {
                 logger.success(`${logger.EMOJIS.chain} Transaction successful!`);
                 logger.info(`TX Hash: ${logger.COLORS.cyan}${txResult.hash}${logger.COLORS.reset}`);
-                stats.requests++;
-                stats.txs++;
+                accountsStats[accountIndex].requests++;
+                accountsStats[accountIndex].txs++;
                 logger.separator();
                 return true;
             }
@@ -253,55 +269,155 @@ async function createRequest(session_token) {
         return false;
     } catch (error) {
         logger.error(`Request creation failed: ${error.message}`);
-        stats.errors++;
+        accountsStats[accountIndex].errors++;
         return false;
     }
 }
 
-// Execute daily tasks
-async function executeDailyTasks(tokenData) {
-    logger.banner('🚀 STARTING DAILY TASK EXECUTION', logger.COLORS.cyan);
+// Execute daily tasks for one account
+async function executeDailyTasks(tokenData, accountIndex) {
+    logger.banner(`🚀 STARTING DAILY TASK - ACCOUNT #${accountIndex + 1}`, logger.COLORS.cyan);
 
     try {
         const session_token = tokenData.token;
+        const address = tokenData.address;
 
         logger.info(`${logger.EMOJIS.info} Checking daily task status...`);
-        const dailyTaskResponse = await retryWithBackoff(() => verifyDailyTask(session_token));
+        const dailyTaskResponse = await retryWithBackoff(() => verifyDailyTask(session_token, address));
+
+        // Validasi response
+        if (!dailyTaskResponse || !dailyTaskResponse.data) {
+            logger.error('Invalid response from daily task verification');
+            logger.warn('Skipping this account...');
+            return false;
+        }
 
         const { is_create_agent, is_create_request, finish_time } = dailyTaskResponse.data;
+        
+        // Validasi property
+        if (typeof is_create_agent === 'undefined' || typeof is_create_request === 'undefined') {
+            logger.error('Missing required properties in response');
+            logger.warn('Skipping this account...');
+            return false;
+        }
+
         const now = Math.floor(Date.now() / 1000);
         const cooldownEndTime = finish_time + (24 * 60 * 60);
         const secondsUntilNextTask = cooldownEndTime - now;
 
         let taskCompleted = false;
 
+        // Process agent task
         if (!is_create_agent) {
             logger.info(`${logger.EMOJIS.robot} Agent task available - proceeding...`);
-            taskCompleted = await createAgent(session_token);
+            const agentResult = await createAgent(session_token, accountIndex);
+            if (agentResult) taskCompleted = true;
+        } else {
+            logger.info(`${logger.EMOJIS.check} Agent task already completed`);
         }
+
+        // Process request task
         if (!is_create_request) {
             logger.info(`${logger.EMOJIS.info} Request task available - proceeding...`);
-            taskCompleted = await createRequest(session_token);
+            const requestResult = await createRequest(session_token, accountIndex);
+            if (requestResult) taskCompleted = true;
         } else {
-            logger.warn(`${logger.EMOJIS.trophy} All daily tasks completed!`);
-            logger.info('No new tasks available at this time');
+            logger.info(`${logger.EMOJIS.check} Request task already completed`);
+        }
+
+        // Both tasks completed
+        if (is_create_agent && is_create_request) {
+            logger.warn(`${logger.EMOJIS.trophy} All daily tasks already completed!`);
             logger.info(`Next tasks available in: ${logger.countdown(secondsUntilNextTask)}`);
         }
 
-        stats.lastRun = new Date().toLocaleString();
-        stats.nextTaskTime = cooldownEndTime;
-        stats.cooldownSeconds = secondsUntilNextTask;
+        accountsStats[accountIndex].lastRun = new Date().toLocaleString();
+        accountsStats[accountIndex].cooldownSeconds = secondsUntilNextTask;
 
         if (taskCompleted) {
-            logger.banner('✅ TASK EXECUTION SUCCESSFUL', logger.COLORS.green);
+            logger.banner('✅ TASK COMPLETED SUCCESSFULLY', logger.COLORS.green);
         }
+
+        return true;
 
     } catch (error) {
         logger.error(`Daily task execution failed: ${error.message}`);
-        stats.errors++;
+        logger.warn('Skipping this account...');
+        accountsStats[accountIndex].errors++;
+        return false;
     }
+}
 
-    return stats.cooldownSeconds > 0 ? stats.cooldownSeconds : WAIT_HOURS * 60 * 60;
+// Process single account completely
+async function processAccount(private_key, accountIndex, tokenData = null) {
+    logger.separator();
+    logger.info(`${logger.COLORS.cyan}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${logger.COLORS.reset}`);
+    logger.info(`${logger.COLORS.cyan}           PROCESSING ACCOUNT #${accountIndex + 1}/${PRIVATE_KEYS.length}${logger.COLORS.reset}`);
+    logger.info(`${logger.COLORS.cyan}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${logger.COLORS.reset}`);
+    logger.separator();
+
+    try {
+        // Authenticate if no token data
+        if (!tokenData) {
+            tokenData = await getToken(private_key, accountIndex);
+            if (!tokenData) {
+                logger.error(`❌ Account #${accountIndex + 1} authentication failed - SKIPPING`);
+                logger.separator();
+                return null;
+            }
+        } else {
+            // Check token validity
+            const isValid = await checkTokenValid(tokenData.token_expire_time);
+            if (!isValid) {
+                logger.info('Token expired, re-authenticating...');
+                tokenData = await getToken(private_key, accountIndex);
+                if (!tokenData) {
+                    logger.error(`❌ Account #${accountIndex + 1} re-authentication failed - SKIPPING`);
+                    logger.separator();
+                    return null;
+                }
+            }
+        }
+
+        // Execute daily tasks
+        const taskResult = await executeDailyTasks(tokenData, accountIndex);
+        
+        if (!taskResult) {
+            logger.warn(`⚠️ Account #${accountIndex + 1} task execution failed - SKIPPING`);
+            logger.separator();
+            return tokenData; // Return token data for next cycle
+        }
+
+        // Refresh user data
+        const loader = logger.loading('Refreshing user data');
+        try {
+            const userData = await getUserData(tokenData.token);
+            logger.stopLoading(loader);
+
+            if (userData && userData.data) {
+                accountsStats[accountIndex].uid = userData.data.uid;
+                accountsStats[accountIndex].totalPoint = userData.data.total_point;
+                accountsStats[accountIndex].days = userData.data.days;
+                logger.success(`${logger.EMOJIS.check} User data refreshed`);
+                logger.info(`UID: ${logger.COLORS.yellow}${accountsStats[accountIndex].uid}${logger.COLORS.reset} | Points: ${logger.COLORS.yellow}${accountsStats[accountIndex].totalPoint}${logger.COLORS.reset} | Days: ${logger.COLORS.yellow}${accountsStats[accountIndex].days}${logger.COLORS.reset}`);
+            }
+        } catch (error) {
+            logger.stopLoading(loader);
+            logger.warn(`Failed to refresh user data: ${error.message}`);
+        }
+
+        logger.banner(`✅ ACCOUNT #${accountIndex + 1} COMPLETED`, logger.COLORS.green);
+        logger.separator();
+
+        return tokenData;
+
+    } catch (error) {
+        logger.error(`❌ Critical error processing account #${accountIndex + 1}: ${error.message}`);
+        logger.warn('SKIPPING to next account...');
+        accountsStats[accountIndex].errors++;
+        logger.separator();
+        return tokenData;
+    }
 }
 
 // Main loop
@@ -310,70 +426,107 @@ async function main() {
 
     logger.banner('🔥 SYSTEM INITIALIZED', logger.COLORS.green);
     logger.info(`Start Time: ${new Date().toLocaleString()}`);
-    logger.info(`Mode: Automated (${WAIT_HOURS}h intervals)`);
+    logger.info(`Mode: Sequential Processing (${WAIT_HOURS}h intervals)`);
+    logger.info(`Total Accounts: ${PRIVATE_KEYS.length}`);
     logger.separator();
 
-    let tokenData = await retryWithBackoff(() => getToken());
-
-    if (!tokenData) {
-        logger.error('Failed to authenticate. Please check your configuration.');
+    if (PRIVATE_KEYS.length === 0) {
+        logger.error('No valid private keys found in .env file!');
+        logger.info('Please add PRIVATE_KEY entries in your .env file');
+        logger.info('Format:');
+        logger.info('PRIVATE_KEY=0x...');
+        logger.info('PRIVATE_KEY=0x...');
         return;
     }
+
+    // Initialize stats for each account
+    PRIVATE_KEYS.forEach((_, index) => {
+        accountsStats[index] = {
+            uid: null,
+            totalPoint: 0,
+            days: 0,
+            agents: 0,
+            requests: 0,
+            txs: 0,
+            errors: 0,
+            lastRun: null,
+            startTime: Date.now(),
+            cooldownSeconds: 0
+        };
+    });
+
+    // Store token data for each account
+    const tokenDataArray = new Array(PRIVATE_KEYS.length).fill(null);
 
     let cycleCount = 0;
 
     while (true) {
         try {
             cycleCount++;
-            logger.banner(`🔄 CYCLE ${cycleCount}`, logger.COLORS.magenta);
+            logger.banner(`🔄 CYCLE ${cycleCount} - SEQUENTIAL PROCESSING`, logger.COLORS.magenta);
 
-            // Check token validity
-            const isValid = await checkTokenValid(tokenData.token_expire_time);
-            if (!isValid) {
-                tokenData = await retryWithBackoff(() => getToken());
-                if (!tokenData) {
-                    logger.error('Re-authentication failed. Waiting before retry...');
-                    await sleep(60000);
-                    continue;
+            // Process each account ONE BY ONE
+            for (let i = 0; i < PRIVATE_KEYS.length; i++) {
+                logger.info(`\n${logger.COLORS.yellow}>>> Starting Account #${i + 1}...${logger.COLORS.reset}\n`);
+                
+                tokenDataArray[i] = await processAccount(PRIVATE_KEYS[i], i, tokenDataArray[i]);
+                
+                // Wait before next account (except for last account)
+                if (i < PRIVATE_KEYS.length - 1) {
+                    logger.info(`${logger.COLORS.dim}⏳ Waiting 3 seconds before next account...${logger.COLORS.reset}\n`);
+                    await sleep(3000);
                 }
             }
 
-            // Execute daily tasks
-            const cooldownSeconds = await executeDailyTasks(tokenData);
-            const cooldownHours = cooldownSeconds / (60 * 60);
+            // Show summary for all accounts
+            logger.separator();
+            logger.banner('📊 ALL ACCOUNTS SUMMARY', logger.COLORS.blue);
+            
+            let totalAgents = 0;
+            let totalRequests = 0;
+            let totalTxs = 0;
+            let totalErrors = 0;
+            let totalPoints = 0;
 
-            // Refresh user data 
-            const loader6 = logger.loading('Refreshing user data');
-            try {
-                const userData = await retryWithBackoff(() => getUserData(tokenData.token));
-                logger.stopLoading(loader6);
+            for (let i = 0; i < PRIVATE_KEYS.length; i++) {
+                if (accountsStats[i]) {
+                    logger.info(`\n${logger.COLORS.cyan}Account #${i + 1}:${logger.COLORS.reset}`);
+                    logger.info(`  UID: ${accountsStats[i].uid || 'N/A'}`);
+                    logger.info(`  Points: ${accountsStats[i].totalPoint}`);
+                    logger.info(`  Days: ${accountsStats[i].days}`);
+                    logger.info(`  Agents: ${accountsStats[i].agents}`);
+                    logger.info(`  Requests: ${accountsStats[i].requests}`);
+                    logger.info(`  Blockchain TXs: ${accountsStats[i].txs}`);
+                    logger.info(`  Errors: ${accountsStats[i].errors}`);
 
-                if (userData && userData.data) {
-                    stats.uid = userData.data.uid;
-                    stats.totalPoint = userData.data.total_point;
-                    stats.days = userData.data.days;
-                    logger.success(`${logger.EMOJIS.check} User data refreshed`);
-                    logger.info(`UID: ${logger.COLORS.yellow}${stats.uid}${logger.COLORS.reset} | Points: ${logger.COLORS.yellow}${stats.totalPoint}${logger.COLORS.reset} | Days: ${logger.COLORS.yellow}${stats.days}${logger.COLORS.reset}`);
-                } else {
-                    logger.warn(`Failed to refresh user data - invalid response`);
-                    if (userData) logger.info(`Response: ${JSON.stringify(userData)}`);
+                    totalAgents += accountsStats[i].agents;
+                    totalRequests += accountsStats[i].requests;
+                    totalTxs += accountsStats[i].txs;
+                    totalErrors += accountsStats[i].errors;
+                    totalPoints += accountsStats[i].totalPoint;
                 }
-            } catch (error) {
-                logger.stopLoading(loader6);
-                logger.error(`Failed to refresh user data: ${error.message}`);
             }
 
-            showStats(stats);
+            logger.separator();
+            logger.info(`${logger.COLORS.green}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${logger.COLORS.reset}`);
+            logger.info(`${logger.COLORS.green}                 TOTAL SUMMARY${logger.COLORS.reset}`);
+            logger.info(`${logger.COLORS.green}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${logger.COLORS.reset}`);
+            logger.info(`  🏆 Total Points: ${logger.COLORS.yellow}${totalPoints}${logger.COLORS.reset}`);
+            logger.info(`  🤖 Total Agents: ${logger.COLORS.yellow}${totalAgents}${logger.COLORS.reset}`);
+            logger.info(`  📋 Total Requests: ${logger.COLORS.yellow}${totalRequests}${logger.COLORS.reset}`);
+            logger.info(`  ⛓️  Total Blockchain TXs: ${logger.COLORS.yellow}${totalTxs}${logger.COLORS.reset}`);
+            logger.info(`  ⚠️  Total Errors: ${logger.COLORS.yellow}${totalErrors}${logger.COLORS.reset}`);
 
-            const runtime = Math.floor((Date.now() - stats.startTime) / 1000 / 60);
-            logger.info(`${logger.EMOJIS.hourglass} Total Runtime: ${runtime} minutes`);
+            const runtime = Math.floor((Date.now() - accountsStats[0].startTime) / 1000 / 60);
+            logger.info(`\n  ⏱️  Total Runtime: ${logger.COLORS.cyan}${runtime} minutes${logger.COLORS.reset}`);
+            logger.info(`${logger.COLORS.green}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${logger.COLORS.reset}`);
 
-            await countdownTimer(cooldownHours);
+            // Wait for next cycle
+            await countdownTimer(WAIT_HOURS);
 
         } catch (error) {
-            logger.error(`Critical error in main loop: ${error.message}`);
-            stats.errors++;
-            logger.warn('Attempting recovery in 5 minutes...');
+            logger.error(`❌ Critical error in main loop: ${error.message}`);
+            logger.warn('⚠️ Attempting recovery in 5 minutes...');
             await sleep(300000);
         }
     }
@@ -383,8 +536,15 @@ process.on('SIGINT', () => {
     logger.separator();
     logger.banner('🚨 SHUTDOWN INITIATED', logger.COLORS.yellow);
     logger.info('Saving session data...');
-    showStats(stats);
-    logger.success('Bot stopped gracefully. Goodbye! 👋');
+    
+    logger.info('\n📊 Final Statistics:');
+    for (let i = 0; i < PRIVATE_KEYS.length; i++) {
+        if (accountsStats[i]) {
+            logger.info(`Account #${i + 1}: ${accountsStats[i].agents} agents, ${accountsStats[i].requests} requests, ${accountsStats[i].txs} txs, ${accountsStats[i].errors} errors`);
+        }
+    }
+    
+    logger.success('\n👋 Bot stopped gracefully. Goodbye!');
     process.exit(0);
 });
 
