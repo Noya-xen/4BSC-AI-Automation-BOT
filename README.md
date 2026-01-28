@@ -218,4 +218,4 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 **Copyright © 2026 ZLKCYBER**
 
-**Modified by Claude AI for sequential multi-account processing**
+**Modified Noya-xen by Claude AI for sequential multi-account processing**
